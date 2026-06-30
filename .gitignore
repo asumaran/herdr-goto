@@ -1,0 +1,13 @@
+# Compiled binary (built locally or in CI; attached to GitHub Releases as an asset).
+/goto
+goto-darwin-*
+goto-linux-*
+
+# Release staging
+/dist/
+
+# Runtime state (lives in the herdr config dir, never in the repo).
+state.json
+
+# macOS
+.DS_Store
