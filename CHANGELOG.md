@@ -1,3 +1,7 @@
+## v0.3.0 (2026-06-30)
+
+* feat(ui): show agent status dots in the sidebar gutter (67ecd61)
+
 ## v0.2.0 (2026-06-30)
 
 * feat: mark dev builds in the prompt (a8fa20a)
