@@ -303,7 +303,7 @@ func defaultKeys() keyMap {
 type rowItem struct {
 	n     *node
 	depth int
-	num   int   // jump number shown as [n]; original when unfiltered, else 1..N
+	num   int // jump number shown as [n]; original when unfiltered, else 1..N
 	match bool
 	score int   // fuzzy score (only meaningful when match)
 	idx   []int // matched character positions, for highlighting
