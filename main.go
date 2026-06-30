@@ -73,6 +73,7 @@ type node struct {
 	wsID     string // workspace to focus (repo/worktree, and a pane's workspace)
 	paneID   string // pane to focus
 	num      int    // 1..9 for repo headers, else 0
+	status   string // aggregated agent status (see statusDot); drives the gutter dot
 	expanded bool
 	children []*node
 }
@@ -145,6 +146,47 @@ func paneLeaf(p paneInfo) string {
 	return name + status + "  " + filepath.Base(homeRel(p.Cwd))
 }
 
+// paneStatus is the agent status used for the gutter dot. Shell panes (no agent)
+// carry no status so they don't pull a workspace's aggregate toward a stale dot.
+func paneStatus(p paneInfo) string {
+	if p.Agent == "" {
+		return ""
+	}
+	return p.AgentStatus
+}
+
+// statusRank orders agent statuses when aggregating a workspace's panes,
+// mirroring herdr's workspace_attention_priority: blocked beats done, done beats
+// working, working beats idle, idle beats none/unknown.
+func statusRank(s string) int {
+	switch s {
+	case "blocked":
+		return 4
+	case "done":
+		return 3
+	case "working":
+		return 2
+	case "idle":
+		return 1
+	default: // "unknown", "" (shell / no agent)
+		return 0
+	}
+}
+
+// aggregateStatus sets n.status to the highest-priority status among n and its
+// descendants, so a repo/worktree reflects its panes' state even when panes are
+// hidden. Returns the resolved status for the recursion.
+func aggregateStatus(n *node) string {
+	best := n.status
+	for _, c := range n.children {
+		if s := aggregateStatus(c); statusRank(s) > statusRank(best) {
+			best = s
+		}
+	}
+	n.status = best
+	return best
+}
+
 func buildTree(wss []wsInfo, panes []paneInfo) []*node {
 	byWs := map[string][]paneInfo{}
 	for _, p := range panes {
@@ -157,7 +199,7 @@ func buildTree(wss []wsInfo, panes []paneInfo) []*node {
 			leaf := paneLeaf(p)
 			out = append(out, &node{
 				kind: "pane", label: leaf, path: parentPath + " › " + leaf,
-				wsID: wsID, paneID: p.ID, expanded: true,
+				wsID: wsID, paneID: p.ID, status: paneStatus(p), expanded: true,
 			})
 		}
 		return out
@@ -247,6 +289,9 @@ func buildTree(wss []wsInfo, panes []paneInfo) []*node {
 		}
 		roots = append(roots, repo)
 	}
+	for _, r := range roots {
+		aggregateStatus(r)
+	}
 	return roots
 }
 
@@ -331,7 +376,32 @@ var (
 	stNum    = lipgloss.NewStyle().Foreground(lipgloss.Color("12"))
 	// stDev colors the "(dev)" marker shown in the prompt for non-release builds.
 	stDev = lipgloss.NewStyle().Foreground(lipgloss.Color("208")).Bold(true)
+
+	// Gutter status dots, mirroring herdr's sidebar state_dot.
+	stDotBlocked = lipgloss.NewStyle().Foreground(lipgloss.Color("9"))  // red
+	stDotWorking = lipgloss.NewStyle().Foreground(lipgloss.Color("11")) // yellow
+	stDotDone    = lipgloss.NewStyle().Foreground(lipgloss.Color("6"))  // teal
+	stDotIdle    = lipgloss.NewStyle().Foreground(lipgloss.Color("10")) // green
+	stDotNone    = lipgloss.NewStyle().Foreground(lipgloss.Color("8"))  // dim
 )
+
+// statusDot renders the 1-rune left-gutter indicator for an aggregated agent
+// status, mirroring herdr's sidebar state_dot (blocked/working/done filled,
+// idle hollow, none/unknown dim).
+func statusDot(s string) string {
+	switch s {
+	case "blocked":
+		return stDotBlocked.Render("●")
+	case "working":
+		return stDotWorking.Render("●")
+	case "done":
+		return stDotDone.Render("●")
+	case "idle":
+		return stDotIdle.Render("○")
+	default: // "unknown", "" (shell / no agent)
+		return stDotNone.Render("·")
+	}
+}
 
 // promptText builds the textinput prompt. Release builds (version stamped from a
 // vX.Y.Z tag) show "goto ❯ "; non-release builds (`dev` / `local-<sha>`) insert
@@ -490,11 +560,14 @@ func (m *model) selectBestMatch() {
 
 func rowLine(r rowItem, selected bool) string {
 	indent := strings.Repeat("  ", r.depth)
+	// The status dot sits in its own gutter to the left, outside the selection
+	// highlight (nested ANSI on a background renders inconsistently across
+	// terminals).
+	dot := statusDot(r.n.status) + " "
 	if selected {
-		// Plain text inside the highlight (nested ANSI on a background renders
-		// inconsistently across terminals). Constant 2-col gutter keeps content
+		// Plain text inside the highlight. Constant 2-col gutter keeps content
 		// aligned whether or not the row is selected.
-		return stSel.Render("▌ " + indent + plain(r))
+		return dot + stSel.Render("▌ "+indent+plain(r))
 	}
 	num := ""
 	if r.n.kind == "repo" && r.num > 0 {
@@ -504,7 +577,7 @@ func rowLine(r rowItem, selected bool) string {
 	if r.match {
 		name = highlight(r.n.label, r.idx)
 	}
-	return "  " + indent + num + name
+	return dot + "  " + indent + num + name
 }
 
 // highlight styles the fuzzy-matched characters within a label.
@@ -682,7 +755,7 @@ func main() {
 			if n.kind == "pane" {
 				id = n.paneID
 			}
-			fmt.Printf("%s%s%s\t(%s %s)\n", strings.Repeat("  ", d), prefix, n.label, n.kind, id)
+			fmt.Printf("%s%s%s\t(%s %s %s)\n", strings.Repeat("  ", d), prefix, n.label, n.kind, n.status, id)
 			for _, c := range n.children {
 				walk(c, d+1)
 			}
