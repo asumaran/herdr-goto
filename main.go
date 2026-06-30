@@ -329,7 +329,19 @@ var (
 	stMatch  = lipgloss.NewStyle().Foreground(lipgloss.Color("11"))
 	stCrumb  = lipgloss.NewStyle().Foreground(lipgloss.Color("6"))
 	stNum    = lipgloss.NewStyle().Foreground(lipgloss.Color("12"))
+	// stDev colors the "(dev)" marker shown in the prompt for non-release builds.
+	stDev = lipgloss.NewStyle().Foreground(lipgloss.Color("208")).Bold(true)
 )
+
+// promptText builds the textinput prompt. Release builds (version stamped from a
+// vX.Y.Z tag) show "goto ❯ "; non-release builds (`dev` / `local-<sha>`) insert
+// an orange "(dev)" marker so it's obvious you're not on a published version.
+func promptText() string {
+	if strings.HasPrefix(version, "v") {
+		return stPrompt.Render("goto ❯ ")
+	}
+	return stPrompt.Render("goto (") + stDev.Render("dev") + stPrompt.Render(") ❯ ")
+}
 
 // kindBonus biases the ranking so repo/worktree names outrank panes on ties,
 // keeping the "type h -> herdr" feel even though fuzzy does the real scoring.
@@ -682,8 +694,8 @@ func main() {
 	}
 
 	ti := textinput.New()
-	ti.Prompt = "goto ❯ "
-	ti.PromptStyle = stPrompt
+	ti.Prompt = promptText()
+	ti.PromptStyle = lipgloss.NewStyle() // colors are already baked into the prompt
 	ti.Focus()
 
 	allNodes, lowerLabels := flatten(roots)
