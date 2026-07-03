@@ -1,3 +1,7 @@
+## v0.4.0 (2026-07-02)
+
+* feat(search): match git branch names in addition to labels (3a1277f)
+
 ## v0.3.0 (2026-06-30)
 
 * feat(ui): show agent status dots in the sidebar gutter (67ecd61)
