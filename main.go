@@ -10,13 +10,17 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/charmbracelet/bubbles/help"
 	"github.com/charmbracelet/bubbles/key"
@@ -70,6 +74,11 @@ type node struct {
 	kind     string // "repo" | "worktree" | "pane"
 	label    string // own display text (matched against the query)
 	branch   string // git branch of the checkout; extra search text (labels are folder slugs, branches keep their "/")
+	ticket   string // normalized Jira key ("FED-2030") from branch/label, or the PR title as fallback
+	ghSlug   string // "owner/repo" of the GitHub origin; "" when non-GitHub/unknown
+	pr       *prRef // PR for this branch, annotated from cache/gh; nil until known or when none
+	tktW     int    // ticket column width within the sibling group (0 = no prefix)
+	prW      int    // "#123" column width within the sibling group (0 = no PR column)
 	path     string // breadcrumb, e.g. "monorepo-front › infra-metrics"
 	wsID     string // workspace to focus (repo/worktree, and a pane's workspace)
 	paneID   string // pane to focus
@@ -121,6 +130,165 @@ func saveStateCmd(s persisted) tea.Cmd {
 	}
 }
 
+// ---- GitHub PR info (via gh, async) ----
+
+// prRef is the PR shown next to a branch. Ticket is extracted from the PR
+// title and used only when the branch/label carry no ticket themselves.
+type prRef struct {
+	Number int    `json:"number"`
+	State  string `json:"state"` // "open" | "draft" | "merged" | "closed"
+	Ticket string `json:"ticket,omitempty"`
+}
+
+// ghPR mirrors one item of `gh pr list --json number,headRefName,state,isDraft,title`.
+type ghPR struct {
+	Number      int    `json:"number"`
+	HeadRefName string `json:"headRefName"`
+	State       string `json:"state"` // OPEN | MERGED | CLOSED
+	IsDraft     bool   `json:"isDraft"`
+	Title       string `json:"title"`
+}
+
+func (p ghPR) ref() prRef {
+	state := strings.ToLower(p.State)
+	if p.IsDraft && p.State == "OPEN" {
+		state = "draft"
+	}
+	return prRef{Number: p.Number, State: state, Ticket: ticketFrom(p.Title)}
+}
+
+type repoPRs struct {
+	FetchedAt time.Time        `json:"fetched_at"`
+	Branches  map[string]prRef `json:"branches"`
+}
+
+// prCache is the stale-while-revalidate disk cache of branch -> PR per repo:
+// cached entries render immediately on startup while gh refreshes them in the
+// background, so PR info is visible even in this tool's open-pick-exit
+// lifetime.
+type prCache struct {
+	Repos map[string]repoPRs `json:"repos"`
+}
+
+// prCacheFresh is how recent a repo's cached PRs must be to skip the
+// background refresh. It only debounces rapid reopen cycles; older entries
+// are still shown immediately while they revalidate.
+const prCacheFresh = 60 * time.Second
+
+func prCacheFile() string {
+	return filepath.Join(filepath.Dir(stateFile()), "prcache.json")
+}
+
+func loadPRCache() prCache {
+	var c prCache
+	if data, err := os.ReadFile(prCacheFile()); err == nil {
+		_ = json.Unmarshal(data, &c)
+	}
+	if c.Repos == nil {
+		c.Repos = map[string]repoPRs{}
+	}
+	return c
+}
+
+func savePRCacheCmd(c prCache) tea.Cmd {
+	return func() tea.Msg {
+		if data, err := json.Marshal(c); err == nil {
+			path := prCacheFile()
+			_ = os.MkdirAll(filepath.Dir(path), 0o755)
+			_ = os.WriteFile(path, data, 0o644)
+		}
+		return nil
+	}
+}
+
+// repoPRsMsg delivers one repo's branch -> PR mapping fetched from gh. err
+// leaves nodes and cache untouched (missing gh, network down, non-GitHub);
+// degradation is silent by design.
+type repoPRsMsg struct {
+	slug     string
+	byBranch map[string]prRef
+	err      bool
+}
+
+// fetchRepoPRsCmd resolves the PR of each local branch with one
+// `gh pr list --head <branch>` call per branch, run in parallel. A repo-wide
+// listing would miss older PRs in busy shared repos, where the newest N PRs
+// are mostly other people's. prev (the previously cached mapping) fills in
+// branches whose lookup failed transiently, so an error never wipes a valid
+// cached PR; only when every branch fails is the whole message marked err.
+func fetchRepoPRsCmd(slug string, branches []string, prev map[string]prRef) tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+		defer cancel()
+		type result struct {
+			pr  *prRef
+			err bool
+		}
+		results := make([]result, len(branches))
+		var wg sync.WaitGroup
+		for i, branch := range branches {
+			wg.Add(1)
+			go func(i int, branch string) {
+				defer wg.Done()
+				out, err := exec.CommandContext(ctx, "gh", "pr", "list", "--repo", slug,
+					"--head", branch, "--state", "all",
+					"--json", "number,headRefName,state,isDraft,title",
+					"--limit", "5").Output()
+				if err != nil {
+					results[i] = result{err: true}
+					return
+				}
+				var prs []ghPR
+				if json.Unmarshal(out, &prs) != nil {
+					results[i] = result{err: true}
+					return
+				}
+				if len(prs) > 0 {
+					p := prs[0].ref() // newest first
+					results[i] = result{pr: &p}
+				}
+			}(i, branch)
+		}
+		wg.Wait()
+
+		byBranch := map[string]prRef{}
+		errs := 0
+		for i, r := range results {
+			switch {
+			case r.err:
+				errs++
+				if p, ok := prev[branches[i]]; ok {
+					byBranch[branches[i]] = p
+				}
+			case r.pr != nil:
+				byBranch[branches[i]] = *r.pr
+			}
+		}
+		if errs == len(branches) {
+			return repoPRsMsg{slug: slug, err: true}
+		}
+		return repoPRsMsg{slug: slug, byBranch: byBranch}
+	}
+}
+
+// annotatePRs applies a branch -> PR mapping to one repo's nodes, clearing
+// entries whose branch no longer has a PR and falling back to the PR-title
+// ticket when branch/label yielded none.
+func annotatePRs(nodes []*node, byBranch map[string]prRef) {
+	for _, n := range nodes {
+		p, ok := byBranch[n.branch]
+		if !ok {
+			n.pr = nil
+			continue
+		}
+		pp := p
+		n.pr = &pp
+		if n.ticket == "" && p.Ticket != "" {
+			n.ticket = p.Ticket
+		}
+	}
+}
+
 func loadJSON(args []string, out any) error {
 	data, err := exec.Command(herdrBin(), args...).Output()
 	if err != nil {
@@ -136,11 +304,11 @@ func homeRel(p string) string {
 	return p
 }
 
-// gitBranch resolves the branch checked out at path by reading .git/HEAD
-// directly (no subprocess; a `git` call per workspace would slow startup).
-// Handles both main checkouts (.git dir) and linked worktrees (.git file with
-// a "gitdir:" pointer). Returns "" for detached HEAD or non-repos.
-func gitBranch(path string) string {
+// resolveGitDir returns the git dir of the checkout at path, handling both
+// main checkouts (.git dir) and linked worktrees (.git file with a "gitdir:"
+// pointer). Returns "" for non-repos. Reads the filesystem directly (no
+// subprocess; a `git` call per workspace would slow startup).
+func resolveGitDir(path string) string {
 	if path == "" {
 		return ""
 	}
@@ -161,6 +329,16 @@ func gitBranch(path string) string {
 		}
 		gitdir = target
 	}
+	return gitdir
+}
+
+// gitBranch resolves the branch checked out at path by reading .git/HEAD
+// directly. Returns "" for detached HEAD or non-repos.
+func gitBranch(path string) string {
+	gitdir := resolveGitDir(path)
+	if gitdir == "" {
+		return ""
+	}
 	head, err := os.ReadFile(filepath.Join(gitdir, "HEAD"))
 	if err != nil {
 		return ""
@@ -170,6 +348,91 @@ func gitBranch(path string) string {
 		return b
 	}
 	return "" // detached HEAD
+}
+
+// ticketRe matches a Jira-style ticket key: a project key of 2+ letters, a
+// dash and digits (FED-2030, plat-1193). Letters-only before the dash keeps
+// slugs like "e2e" or "v1-2" from matching.
+var ticketRe = regexp.MustCompile(`(?i)\b([a-z][a-z]+-[0-9]+)\b`)
+
+// ticketFrom extracts a normalized (uppercase) ticket key from the first
+// source that contains one. Returns "" when none matches.
+func ticketFrom(sources ...string) string {
+	for _, s := range sources {
+		if m := ticketRe.FindString(s); m != "" {
+			return strings.ToUpper(m)
+		}
+	}
+	return ""
+}
+
+// githubSlug resolves "owner/repo" from the origin remote of the repo at
+// repoRoot, reading the git config file directly (startup-safe, no
+// subprocess). Returns "" when the origin is missing or not on github.com.
+func githubSlug(repoRoot string) string {
+	gitdir := resolveGitDir(repoRoot)
+	if gitdir == "" {
+		return ""
+	}
+	data, err := os.ReadFile(filepath.Join(gitdir, "config"))
+	if err != nil {
+		// A linked-worktree gitdir keeps config in the common dir.
+		common, cerr := os.ReadFile(filepath.Join(gitdir, "commondir"))
+		if cerr != nil {
+			return ""
+		}
+		target := strings.TrimSpace(string(common))
+		if !filepath.IsAbs(target) {
+			target = filepath.Join(gitdir, target)
+		}
+		if data, err = os.ReadFile(filepath.Join(target, "config")); err != nil {
+			return ""
+		}
+	}
+	return githubSlugFromURL(originURL(string(data)))
+}
+
+// originURL scans git config content for the url of [remote "origin"].
+func originURL(config string) string {
+	inOrigin := false
+	for _, line := range strings.Split(config, "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "[") {
+			inOrigin = line == `[remote "origin"]`
+			continue
+		}
+		if !inOrigin {
+			continue
+		}
+		if rest, ok := strings.CutPrefix(line, "url"); ok {
+			rest = strings.TrimSpace(rest)
+			if v, ok := strings.CutPrefix(rest, "="); ok {
+				return strings.TrimSpace(v)
+			}
+		}
+	}
+	return ""
+}
+
+// githubSlugFromURL extracts "owner/repo" from the ssh/https GitHub remote
+// URL forms. Non-GitHub hosts return "".
+func githubSlugFromURL(url string) string {
+	var rest string
+	switch {
+	case strings.HasPrefix(url, "git@github.com:"):
+		rest = strings.TrimPrefix(url, "git@github.com:")
+	case strings.HasPrefix(url, "ssh://git@github.com/"):
+		rest = strings.TrimPrefix(url, "ssh://git@github.com/")
+	case strings.HasPrefix(url, "https://github.com/"):
+		rest = strings.TrimPrefix(url, "https://github.com/")
+	default:
+		return ""
+	}
+	rest = strings.TrimSuffix(strings.TrimSuffix(rest, "/"), ".git")
+	if strings.Count(rest, "/") != 1 {
+		return ""
+	}
+	return rest
 }
 
 func paneLeaf(p paneInfo) string {
@@ -279,6 +542,16 @@ func buildTree(wss []wsInfo, panes []paneInfo) []*node {
 	}
 	sort.SliceStable(glist, func(i, j int) bool { return glist[i].minN < glist[j].minN })
 
+	slugCache := map[string]string{}
+	slugFor := func(root string) string {
+		if s, ok := slugCache[root]; ok {
+			return s
+		}
+		s := githubSlug(root)
+		slugCache[root] = s
+		return s
+	}
+
 	repoName := func(ws wsInfo) string {
 		if ws.Worktree != nil && ws.Worktree.RepoName != "" {
 			return ws.Worktree.RepoName
@@ -311,6 +584,8 @@ func buildTree(wss []wsInfo, panes []paneInfo) []*node {
 		repo := &node{kind: "repo", label: name, path: name, wsID: main.ID, num: num, expanded: true}
 		if main.Worktree != nil {
 			repo.branch = gitBranch(main.Worktree.CheckoutPath)
+			repo.ticket = ticketFrom(repo.branch)
+			repo.ghSlug = slugFor(main.Worktree.RepoRoot)
 		}
 		repo.children = append(repo.children, paneNodes(main.ID, name)...)
 
@@ -326,6 +601,8 @@ func buildTree(wss []wsInfo, panes []paneInfo) []*node {
 			wt := &node{kind: "worktree", label: ws.Label, path: crumb, wsID: ws.ID, expanded: true}
 			if ws.Worktree != nil {
 				wt.branch = gitBranch(ws.Worktree.CheckoutPath)
+				wt.ticket = ticketFrom(wt.branch, ws.Label)
+				wt.ghSlug = slugFor(ws.Worktree.RepoRoot)
 				if wt.branch != "" && wt.branch != ws.Label {
 					wt.path = crumb + "  (" + wt.branch + ")"
 				}
@@ -414,6 +691,10 @@ type model struct {
 	allNodes      []*node  // flattened, parallel to lowerLabels/lowerBranches
 	lowerLabels   []string // lowercased labels for the fuzzy matcher
 	lowerBranches []string // lowercased branches ("" when same as label); extra match text
+	slugNodes     map[string][]*node // nodes with a branch, grouped by GitHub slug
+	prPending     int                // in-flight gh fetches; cache is saved when it reaches 0
+	cache         prCache            // loaded at startup, merged as repoPRsMsg arrive
+	initCmds      []tea.Cmd          // PR fetches to fan out from Init
 	rows          []rowItem
 	cursor        int
 	showPanes     bool // panes are hidden by default; ctrl+t toggles them
@@ -432,6 +713,13 @@ var (
 	stNum    = lipgloss.NewStyle().Foreground(lipgloss.Color("12"))
 	// stDev colors the "(dev)" marker shown in the prompt for non-release builds.
 	stDev = lipgloss.NewStyle().Foreground(lipgloss.Color("208")).Bold(true)
+
+	// Ticket / PR prefix: ticket in the crumb teal, PR number colored by state.
+	stTicket   = lipgloss.NewStyle().Foreground(lipgloss.Color("6"))   // teal
+	stPROpen   = lipgloss.NewStyle().Foreground(lipgloss.Color("10"))  // green
+	stPRDraft  = lipgloss.NewStyle().Foreground(lipgloss.Color("8"))   // dim
+	stPRMerged = lipgloss.NewStyle().Foreground(lipgloss.Color("135")) // purple
+	stPRClosed = lipgloss.NewStyle().Foreground(lipgloss.Color("9"))   // red
 
 	// Gutter status dots, mirroring herdr's sidebar state_dot.
 	stDotBlocked = lipgloss.NewStyle().Foreground(lipgloss.Color("9"))  // red
@@ -457,6 +745,98 @@ func statusDot(s string) string {
 	default: // "unknown", "" (shell / no agent)
 		return stDotNone.Render("·")
 	}
+}
+
+func prStyle(state string) lipgloss.Style {
+	switch state {
+	case "draft":
+		return stPRDraft
+	case "merged":
+		return stPRMerged
+	case "closed":
+		return stPRClosed
+	default: // "open"
+		return stPROpen
+	}
+}
+
+// layoutPrefixes stamps per-sibling-group column widths for the ticket / PR
+// prefix so sibling rows align. Widths consider all siblings (not just
+// visible rows) to keep alignment stable while filtering. Nodes with neither
+// ticket nor PR keep 0 = no prefix at all. Re-run whenever PR annotations
+// change.
+func layoutPrefixes(roots []*node) {
+	var layout func(siblings []*node)
+	layout = func(siblings []*node) {
+		tktW, prW := 0, 0
+		for _, n := range siblings {
+			if len(n.ticket) > tktW {
+				tktW = len(n.ticket)
+			}
+			if n.pr != nil {
+				if w := len(fmt.Sprintf("#%d", n.pr.Number)); w > prW {
+					prW = w
+				}
+			}
+		}
+		for _, n := range siblings {
+			if n.ticket != "" || n.pr != nil {
+				n.tktW, n.prW = tktW, prW
+			} else {
+				n.tktW, n.prW = 0, 0
+			}
+			layout(n.children)
+		}
+	}
+	layout(roots)
+}
+
+// prPrefixPlain builds the "TICKET #123  " prefix without styling, for the
+// selected row (nested ANSI inside the selection background misrenders).
+// Empty when the node has neither ticket nor PR; either column pads with
+// spaces when a sibling has it and this row doesn't.
+func prPrefixPlain(n *node) string {
+	if n.tktW == 0 && n.prW == 0 {
+		return ""
+	}
+	s := ""
+	if n.tktW > 0 {
+		s = fmt.Sprintf("%-*s", n.tktW, n.ticket)
+	}
+	if n.prW > 0 {
+		pr := ""
+		if n.pr != nil {
+			pr = fmt.Sprintf("#%d", n.pr.Number)
+		}
+		if s != "" {
+			s += " "
+		}
+		s += fmt.Sprintf("%-*s", n.prW, pr)
+	}
+	return s + "  "
+}
+
+// prPrefix is the styled variant used on unselected rows.
+func prPrefix(n *node) string {
+	if n.tktW == 0 && n.prW == 0 {
+		return ""
+	}
+	s := ""
+	if n.tktW > 0 {
+		s = stTicket.Render(fmt.Sprintf("%-*s", n.tktW, n.ticket))
+	}
+	if n.prW > 0 {
+		if s != "" {
+			s += " "
+		}
+		if n.pr != nil {
+			pr := fmt.Sprintf("#%d", n.pr.Number)
+			s += prStyle(n.pr.State).Render(pr) + strings.Repeat(" ", n.prW-len(pr))
+		} else {
+			s += strings.Repeat(" ", n.prW)
+		}
+	}
+	return s + "  "
 }
 
 // promptText builds the textinput prompt. Release builds (version stamped from a
@@ -643,7 +1023,7 @@ func rowLine(r rowItem, selected bool) string {
 	if r.match {
 		name = highlight(r.n.label, r.idx)
 	}
-	return dot + "  " + indent + num + name
+	return dot + "  " + indent + num + prPrefix(r.n) + name
 }
 
 // highlight styles the fuzzy-matched characters within a label.
@@ -668,9 +1048,9 @@ func highlight(label string, idx []int) string {
 
 func plain(r rowItem) string {
 	if r.n.kind == "repo" && r.num > 0 {
-		return fmt.Sprintf("[%d] %s", r.num, r.n.label)
+		return fmt.Sprintf("[%d] %s%s", r.num, prPrefixPlain(r.n), r.n.label)
 	}
-	return r.n.label
+	return prPrefixPlain(r.n) + r.n.label
 }
 
 func (m *model) renderContent() {
@@ -697,7 +1077,9 @@ func (m *model) ensureVisible() {
 	}
 }
 
-func (m model) Init() tea.Cmd { return textinput.Blink }
+func (m model) Init() tea.Cmd {
+	return tea.Batch(append([]tea.Cmd{textinput.Blink}, m.initCmds...)...)
+}
 
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
@@ -709,6 +1091,19 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.help.Width = msg.Width
 		m.renderContent()
+		return m, nil
+
+	case repoPRsMsg:
+		if !msg.err {
+			annotatePRs(m.slugNodes[msg.slug], msg.byBranch)
+			m.cache.Repos[msg.slug] = repoPRs{FetchedAt: time.Now(), Branches: msg.byBranch}
+			layoutPrefixes(m.roots)
+			m.renderContent()
+		}
+		m.prPending--
+		if m.prPending <= 0 {
+			return m, savePRCacheCmd(m.cache)
+		}
 		return m, nil
 
 	case tea.KeyMsg:
@@ -809,6 +1204,45 @@ func main() {
 		os.Exit(1)
 	}
 	roots := buildTree(ws.Result.Workspaces, pn.Result.Panes)
+	allNodes, lowerLabels, lowerBranches := flatten(roots)
+
+	// Annotate PR info from the disk cache (instant), then schedule a gh
+	// refresh per repo whose cache entry is missing or no longer fresh. The
+	// fetches run from Init, after the TUI is already on screen.
+	slugNodes := map[string][]*node{}
+	for _, n := range allNodes {
+		if n.ghSlug != "" && n.branch != "" {
+			slugNodes[n.ghSlug] = append(slugNodes[n.ghSlug], n)
+		}
+	}
+	cache := loadPRCache()
+	for slug, nodes := range slugNodes {
+		if entry, ok := cache.Repos[slug]; ok {
+			annotatePRs(nodes, entry.Branches)
+		}
+	}
+	layoutPrefixes(roots)
+	var initCmds []tea.Cmd
+	for slug, nodes := range slugNodes {
+		if entry, ok := cache.Repos[slug]; ok && time.Since(entry.FetchedAt) < prCacheFresh {
+			continue
+		}
+		// One --head lookup per unique local branch; main/master checkouts are
+		// skipped (a PR with that head would be someone else's release train).
+		seen := map[string]bool{}
+		var branches []string
+		for _, n := range nodes {
+			if n.branch == "main" || n.branch == "master" || seen[n.branch] {
+				continue
+			}
+			seen[n.branch] = true
+			branches = append(branches, n.branch)
+		}
+		if len(branches) == 0 {
+			continue
+		}
+		initCmds = append(initCmds, fetchRepoPRsCmd(slug, branches, cache.Repos[slug].Branches))
+	}
 
 	if dump {
 		var walk func(n *node, d int)
@@ -816,6 +1250,12 @@ func main() {
 			prefix := ""
 			if n.kind == "repo" && n.num > 0 {
 				prefix = fmt.Sprintf("[%d] ", n.num)
+			}
+			if n.ticket != "" {
+				prefix += n.ticket + " "
+			}
+			if n.pr != nil {
+				prefix += fmt.Sprintf("#%d(%s) ", n.pr.Number, n.pr.State)
 			}
 			id := n.wsID
 			if n.kind == "pane" {
@@ -841,12 +1281,15 @@ func main() {
 	ti.PromptStyle = lipgloss.NewStyle() // colors are already baked into the prompt
 	ti.Focus()
 
-	allNodes, lowerLabels, lowerBranches := flatten(roots)
 	m := model{
 		roots:         roots,
 		allNodes:      allNodes,
 		lowerLabels:   lowerLabels,
 		lowerBranches: lowerBranches,
+		slugNodes:     slugNodes,
+		prPending:     len(initCmds),
+		cache:         cache,
+		initCmds:      initCmds,
 		showPanes:     loadState().ShowPanes,
 		ti:            ti,
 		vp:            viewport.New(80, 20),

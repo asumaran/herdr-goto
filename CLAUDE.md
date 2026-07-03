@@ -104,6 +104,14 @@ asset name from `uname`.
   repo/worktree names outrank panes. Matches keep ancestors visible.
 - Enter on repo/worktree -> `workspace focus` (does not change the focused pane
   inside it). Enter on pane -> focus that pane. No autofocus on switch.
+- Rows are prefixed with the Jira ticket (`KEY-123` regex over branch, then
+  label, then PR title as fallback) and the branch's PR number colored by
+  state (open green, draft dim, merged purple, closed red). Columns align per
+  sibling group; rows with neither ticket nor PR get no prefix. PR data comes
+  from one async `gh pr list` per unique GitHub repo, fired after the TUI is
+  on screen, and cached in `prcache.json` next to `state.json`
+  (stale-while-revalidate; entries fresher than 60s skip the refresh).
+  Missing `gh` or non-GitHub remotes degrade silently to no PR info.
 
 ## Commits & branches
 
