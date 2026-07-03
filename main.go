@@ -69,6 +69,7 @@ type paneResp struct {
 type node struct {
 	kind     string // "repo" | "worktree" | "pane"
 	label    string // own display text (matched against the query)
+	branch   string // git branch of the checkout; extra search text (labels are folder slugs, branches keep their "/")
 	path     string // breadcrumb, e.g. "monorepo-front › infra-metrics"
 	wsID     string // workspace to focus (repo/worktree, and a pane's workspace)
 	paneID   string // pane to focus
@@ -133,6 +134,42 @@ func homeRel(p string) string {
 		return "~" + strings.TrimPrefix(p, h)
 	}
 	return p
+}
+
+// gitBranch resolves the branch checked out at path by reading .git/HEAD
+// directly (no subprocess; a `git` call per workspace would slow startup).
+// Handles both main checkouts (.git dir) and linked worktrees (.git file with
+// a "gitdir:" pointer). Returns "" for detached HEAD or non-repos.
+func gitBranch(path string) string {
+	if path == "" {
+		return ""
+	}
+	gitdir := filepath.Join(path, ".git")
+	if fi, err := os.Stat(gitdir); err != nil {
+		return ""
+	} else if !fi.IsDir() {
+		data, err := os.ReadFile(gitdir)
+		if err != nil {
+			return ""
+		}
+		target := strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(string(data)), "gitdir:"))
+		if target == "" {
+			return ""
+		}
+		if !filepath.IsAbs(target) {
+			target = filepath.Join(path, target)
+		}
+		gitdir = target
+	}
+	head, err := os.ReadFile(filepath.Join(gitdir, "HEAD"))
+	if err != nil {
+		return ""
+	}
+	ref := strings.TrimSpace(string(head))
+	if b, ok := strings.CutPrefix(ref, "ref: refs/heads/"); ok {
+		return b
+	}
+	return "" // detached HEAD
 }
 
 func paneLeaf(p paneInfo) string {
@@ -272,6 +309,9 @@ func buildTree(wss []wsInfo, panes []paneInfo) []*node {
 			num = i + 1
 		}
 		repo := &node{kind: "repo", label: name, path: name, wsID: main.ID, num: num, expanded: true}
+		if main.Worktree != nil {
+			repo.branch = gitBranch(main.Worktree.CheckoutPath)
+		}
 		repo.children = append(repo.children, paneNodes(main.ID, name)...)
 
 		others := []wsInfo{}
@@ -284,6 +324,12 @@ func buildTree(wss []wsInfo, panes []paneInfo) []*node {
 		for _, ws := range others {
 			crumb := name + " › " + ws.Label
 			wt := &node{kind: "worktree", label: ws.Label, path: crumb, wsID: ws.ID, expanded: true}
+			if ws.Worktree != nil {
+				wt.branch = gitBranch(ws.Worktree.CheckoutPath)
+				if wt.branch != "" && wt.branch != ws.Label {
+					wt.path = crumb + "  (" + wt.branch + ")"
+				}
+			}
 			wt.children = paneNodes(ws.ID, crumb)
 			repo.children = append(repo.children, wt)
 		}
@@ -295,15 +341,24 @@ func buildTree(wss []wsInfo, panes []paneInfo) []*node {
 	return roots
 }
 
-// flatten returns every node in tree order plus a parallel slice of lowercased
-// labels, fed to the fuzzy matcher in one shot per keystroke.
-func flatten(roots []*node) ([]*node, []string) {
+// flatten returns every node in tree order plus parallel slices of lowercased
+// labels and branches, fed to the fuzzy matcher in one shot per keystroke. A
+// node's branch entry is "" when it adds nothing over the label (no branch, or
+// identical), so the matcher skips it.
+func flatten(roots []*node) ([]*node, []string, []string) {
 	var nodes []*node
 	var labels []string
+	var branches []string
 	var walk func(n *node)
 	walk = func(n *node) {
 		nodes = append(nodes, n)
-		labels = append(labels, strings.ToLower(n.label))
+		label := strings.ToLower(n.label)
+		labels = append(labels, label)
+		branch := strings.ToLower(n.branch)
+		if branch == label {
+			branch = ""
+		}
+		branches = append(branches, branch)
 		for _, c := range n.children {
 			walk(c)
 		}
@@ -311,7 +366,7 @@ func flatten(roots []*node) ([]*node, []string) {
 	for _, r := range roots {
 		walk(r)
 	}
-	return nodes, labels
+	return nodes, labels, branches
 }
 
 // ---- key bindings (bubbles/key) ----
@@ -355,17 +410,18 @@ type rowItem struct {
 }
 
 type model struct {
-	roots       []*node
-	allNodes    []*node  // flattened, parallel to lowerLabels
-	lowerLabels []string // lowercased labels for the fuzzy matcher
-	rows        []rowItem
-	cursor      int
-	showPanes   bool // panes are hidden by default; ctrl+t toggles them
-	ti          textinput.Model
-	vp          viewport.Model
-	help        help.Model
-	keys        keyMap
-	action      []string // herdr CLI args to run after quit (nil = no action)
+	roots         []*node
+	allNodes      []*node  // flattened, parallel to lowerLabels/lowerBranches
+	lowerLabels   []string // lowercased labels for the fuzzy matcher
+	lowerBranches []string // lowercased branches ("" when same as label); extra match text
+	rows          []rowItem
+	cursor        int
+	showPanes     bool // panes are hidden by default; ctrl+t toggles them
+	ti            textinput.Model
+	vp            viewport.Model
+	help          help.Model
+	keys          keyMap
+	action        []string // herdr CLI args to run after quit (nil = no action)
 }
 
 var (
@@ -438,6 +494,16 @@ func (m *model) applyFilter() {
 	if filtering {
 		for _, mt := range fuzzy.Find(q, m.lowerLabels) {
 			hits[m.allNodes[mt.Index]] = hit{mt.Score, mt.MatchedIndexes}
+		}
+		// Branches are matched separately so queries like "feat/x" find a
+		// worktree whose label is the "feat-x" folder slug. Branch hits carry
+		// no MatchedIndexes: those indexes point into the branch, not the
+		// rendered label, so there is nothing to highlight.
+		for _, mt := range fuzzy.Find(q, m.lowerBranches) {
+			n := m.allNodes[mt.Index]
+			if h, ok := hits[n]; !ok || mt.Score > h.score {
+				hits[n] = hit{mt.Score, nil}
+			}
 		}
 	}
 
@@ -755,7 +821,11 @@ func main() {
 			if n.kind == "pane" {
 				id = n.paneID
 			}
-			fmt.Printf("%s%s%s\t(%s %s %s)\n", strings.Repeat("  ", d), prefix, n.label, n.kind, n.status, id)
+			branch := ""
+			if n.branch != "" {
+				branch = " " + n.branch
+			}
+			fmt.Printf("%s%s%s\t(%s %s %s%s)\n", strings.Repeat("  ", d), prefix, n.label, n.kind, n.status, id, branch)
 			for _, c := range n.children {
 				walk(c, d+1)
 			}
@@ -771,16 +841,17 @@ func main() {
 	ti.PromptStyle = lipgloss.NewStyle() // colors are already baked into the prompt
 	ti.Focus()
 
-	allNodes, lowerLabels := flatten(roots)
+	allNodes, lowerLabels, lowerBranches := flatten(roots)
 	m := model{
-		roots:       roots,
-		allNodes:    allNodes,
-		lowerLabels: lowerLabels,
-		showPanes:   loadState().ShowPanes,
-		ti:          ti,
-		vp:          viewport.New(80, 20),
-		help:        help.New(),
-		keys:        defaultKeys(),
+		roots:         roots,
+		allNodes:      allNodes,
+		lowerLabels:   lowerLabels,
+		lowerBranches: lowerBranches,
+		showPanes:     loadState().ShowPanes,
+		ti:            ti,
+		vp:            viewport.New(80, 20),
+		help:          help.New(),
+		keys:          defaultKeys(),
 	}
 	m.applyFilter()
 	m.renderContent()
