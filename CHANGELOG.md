@@ -1,3 +1,7 @@
+## v0.5.0 (2026-07-04)
+
+* feat(ui): prefix rows with Jira ticket and PR number colored by state (32062c9)
+
 ## v0.4.0 (2026-07-02)
 
 * feat(search): match git branch names in addition to labels (3a1277f)
