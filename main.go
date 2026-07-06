@@ -1010,20 +1010,27 @@ func rowLine(r rowItem, selected bool) string {
 	// highlight (nested ANSI on a background renders inconsistently across
 	// terminals).
 	dot := statusDot(r.n.status) + " "
+	// Fixed 4-col number gutter on every row ("[n] " on numbered repos, blank
+	// otherwise) so unnumbered repos and their descendants keep the same left
+	// edge as numbered ones.
+	numText := "    "
+	if r.n.kind == "repo" && r.num > 0 {
+		numText = fmt.Sprintf("[%d] ", r.num)
+	}
 	if selected {
 		// Plain text inside the highlight. Constant 2-col gutter keeps content
 		// aligned whether or not the row is selected.
-		return dot + stSel.Render("▌ "+indent+plain(r))
+		return dot + stSel.Render("▌ "+numText+indent+plain(r))
 	}
-	num := ""
-	if r.n.kind == "repo" && r.num > 0 {
-		num = stNum.Render(fmt.Sprintf("[%d] ", r.num))
+	num := numText
+	if numText != "    " {
+		num = stNum.Render(numText)
 	}
 	name := r.n.label
 	if r.match {
 		name = highlight(r.n.label, r.idx)
 	}
-	return dot + "  " + indent + num + prPrefix(r.n) + name
+	return dot + "  " + num + indent + prPrefix(r.n) + name
 }
 
 // highlight styles the fuzzy-matched characters within a label.
@@ -1046,10 +1053,9 @@ func highlight(label string, idx []int) string {
 	return b.String()
 }
 
+// plain renders a row's content without styling; the number gutter and indent
+// are prepended by rowLine.
 func plain(r rowItem) string {
-	if r.n.kind == "repo" && r.num > 0 {
-		return fmt.Sprintf("[%d] %s%s", r.num, prPrefixPlain(r.n), r.n.label)
-	}
 	return prPrefixPlain(r.n) + r.n.label
 }
 
@@ -1247,7 +1253,8 @@ func main() {
 	if dump {
 		var walk func(n *node, d int)
 		walk = func(n *node, d int) {
-			prefix := ""
+			// Same fixed number gutter as the TUI so the hierarchy reads the same.
+			prefix := "    "
 			if n.kind == "repo" && n.num > 0 {
 				prefix = fmt.Sprintf("[%d] ", n.num)
 			}
