@@ -1,3 +1,7 @@
+## v0.5.1 (2026-07-05)
+
+* fix(ui): align unnumbered repos and their children with numbered ones (5049446)
+
 ## v0.5.0 (2026-07-04)
 
 * feat(ui): prefix rows with Jira ticket and PR number colored by state (32062c9)
