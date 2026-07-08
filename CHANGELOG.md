@@ -1,3 +1,7 @@
+## v0.7.0 (2026-07-08)
+
+* feat(ui): replace 1-9 digit jump with ticket and PR number search (c8e233e)
+
 ## v0.6.0 (2026-07-08)
 
 * feat(ui): sort worktrees oldest-first by checkout creation time (4ed71ae)
