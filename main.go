@@ -20,6 +20,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/charmbracelet/bubbles/help"
@@ -350,6 +351,20 @@ func gitBranch(path string) string {
 	return "" // detached HEAD
 }
 
+// worktreeCreatedAt returns when the checkout at path was created, using the
+// directory's birth time (darwin). Zero time when the path can't be stat'ed,
+// which sorts those entries first.
+func worktreeCreatedAt(path string) time.Time {
+	fi, err := os.Stat(path)
+	if err != nil {
+		return time.Time{}
+	}
+	if st, ok := fi.Sys().(*syscall.Stat_t); ok {
+		return time.Unix(st.Birthtimespec.Sec, st.Birthtimespec.Nsec)
+	}
+	return fi.ModTime()
+}
+
 // ticketRe matches a Jira-style ticket key: a project key of 2+ letters, a
 // dash and digits (FED-2030, plat-1193). Letters-only before the dash keeps
 // slugs like "e2e" or "v1-2" from matching.
@@ -595,7 +610,28 @@ func buildTree(wss []wsInfo, panes []paneInfo) []*node {
 				others = append(others, ws)
 			}
 		}
-		sort.SliceStable(others, func(a, b int) bool { return others[a].Number < others[b].Number })
+		// Worktrees sort oldest-first by checkout creation time (which tracks
+		// PR order in practice), with the workspace number as tiebreaker.
+		type wsWithTime struct {
+			ws        wsInfo
+			createdAt time.Time
+		}
+		byAge := make([]wsWithTime, len(others))
+		for i, ws := range others {
+			byAge[i] = wsWithTime{ws: ws}
+			if ws.Worktree != nil && ws.Worktree.CheckoutPath != "" {
+				byAge[i].createdAt = worktreeCreatedAt(ws.Worktree.CheckoutPath)
+			}
+		}
+		sort.SliceStable(byAge, func(a, b int) bool {
+			if !byAge[a].createdAt.Equal(byAge[b].createdAt) {
+				return byAge[a].createdAt.Before(byAge[b].createdAt)
+			}
+			return byAge[a].ws.Number < byAge[b].ws.Number
+		})
+		for i, w := range byAge {
+			others[i] = w.ws
+		}
 		for _, ws := range others {
 			crumb := name + " › " + ws.Label
 			wt := &node{kind: "worktree", label: ws.Label, path: crumb, wsID: ws.ID, expanded: true}

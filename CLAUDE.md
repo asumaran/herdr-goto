@@ -95,7 +95,9 @@ asset name from `uname`.
 
 - Tree = two levels by default: repo (== main checkout) -> worktrees. Panes are
   hidden by default; `ctrl+t` toggles them, persisted in `state.json`.
-- Repos ordered by lowest workspace `number`; worktrees inside a repo too.
+- Repos ordered by lowest workspace `number`. Worktrees inside a repo sort
+  oldest-first by checkout creation time (directory birth time, which tracks PR
+  order in practice), workspace `number` as tiebreaker.
   Grouping key: `worktree.repo_key` (falls back to checkout_path, then a pane's
   cwd, then workspace id).
 - `1-9` digits ALWAYS jump (never search text): sidebar numbers when unfiltered,
