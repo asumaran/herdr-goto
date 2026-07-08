@@ -1,3 +1,7 @@
+## v0.6.0 (2026-07-08)
+
+* feat(ui): sort worktrees oldest-first by checkout creation time (4ed71ae)
+
 ## v0.5.1 (2026-07-05)
 
 * fix(ui): align unnumbered repos and their children with numbered ones (5049446)
