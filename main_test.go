@@ -1,6 +1,10 @@
 package main
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/charmbracelet/bubbles/textinput"
+)
 
 func TestTicketFrom(t *testing.T) {
 	cases := []struct {
@@ -85,6 +89,40 @@ func TestLayoutPrefixesAndPlainPrefix(t *testing.T) {
 	}
 	if got := prPrefixPlain(repo); got != "" {
 		t.Errorf("repo without ticket/PR: prefix %q, want empty", got)
+	}
+}
+
+// TestSearchByTicketAndPRNumber covers that digits are plain search text and
+// that the ticket / PR-number corpus is matched: typing a PR number or a
+// ticket key finds the row that displays it, even when neither appears in the
+// label or branch.
+func TestSearchByTicketAndPRNumber(t *testing.T) {
+	byPR := &node{kind: "worktree", label: "webvitals-faro", pr: &prRef{Number: 6449, State: "open"}}
+	byTicket := &node{kind: "worktree", label: "stg-validation", ticket: "FED-2035"}
+	repo := &node{kind: "repo", label: "monorepo-front", expanded: true, children: []*node{byPR, byTicket}}
+	roots := []*node{repo}
+
+	m := model{roots: roots, ti: textinput.New()}
+	m.allNodes, m.lowerLabels, m.lowerBranches = flatten(roots)
+	m.refreshMetas()
+
+	matched := func(query string) map[*node]bool {
+		m.ti.SetValue(query)
+		m.applyFilter()
+		out := map[*node]bool{}
+		for _, r := range m.rows {
+			if r.match {
+				out[r.n] = true
+			}
+		}
+		return out
+	}
+
+	if got := matched("6449"); !got[byPR] || got[byTicket] {
+		t.Errorf("query 6449: matched %v, want only the PR #6449 node", got)
+	}
+	if got := matched("2035"); !got[byTicket] {
+		t.Errorf("query 2035: matched %v, want the FED-2035 node", got)
 	}
 }
 

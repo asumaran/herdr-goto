@@ -15,7 +15,7 @@ binary in a herdr pane.
 key = ["prefix+f", "ctrl+alt+f"]
 type = "pane"
 command = "~/.config/herdr/goto-tui/goto"
-description = "goto (bubbletea tree: 1-9 jump repo, type to search)"
+description = "goto (bubbletea tree: type to search)"
 ```
 
 `type = "pane"` opens the binary zoomed (full screen) with keyboard focus. herdr
@@ -67,8 +67,8 @@ See `CLAUDE.md` for the full release vs. update-local model.
 - Bubble Tea (runtime) + bubbles `textinput` / `viewport` / `key` / `help`.
 - `lipgloss` for styling.
 - `sahilm/fuzzy` for fuzzy matching + scoring + matched-char highlighting (the
-  same matcher `bubbles/list` uses). The tree, the filter-that-keeps-ancestors,
-  the grouping and the numbering are custom (no tree component fits).
+  same matcher `bubbles/list` uses). The tree, the filter-that-keeps-ancestors
+  and the grouping are custom (no tree component fits).
 
 ## herdr CLI it depends on
 
@@ -86,13 +86,13 @@ See `CLAUDE.md` for the full release vs. update-local model.
 - Repo grouping key: `worktree.repo_key` (falls back to checkout_path, then a
   pane's cwd, then workspace id). Workspaces herdr doesn't report worktree
   metadata for may show as their own group — known rough edge.
-- `[n]` digits: original sidebar numbers when unfiltered, renumbered 1..N over
-  the visible results when filtering. A digit ALWAYS jumps (never search text) —
-  decided to keep it simple; no number search (fuzzy finds "ESHOP-1085" by
-  typing letters).
 - Search: fuzzy (substring-tolerant) with scoring; a small kind bonus (repo +8,
   worktree +4) so repo/worktree names outrank panes (typing "h" -> herdr).
-  Matches keep their ancestors visible; cursor jumps to the best match.
+  Besides the label, the branch, the Jira ticket and the PR number are matched
+  (typing "1234" finds the row showing #1234). Matches keep their ancestors
+  visible; cursor jumps to the best match. There used to be a "digits 1-9 jump
+  to a numbered repo" mode; it was removed because it conflicted with searching
+  by PR/ticket number.
 - Enter on a repo/worktree -> `workspace focus` (does NOT change which pane is
   focused inside it; lands where you left it). Enter on a pane -> focus that pane.
 - No autofocus: switching repos must not select the agent pane by default.
@@ -100,5 +100,5 @@ See `CLAUDE.md` for the full release vs. update-local model.
 
 ## Keys
 
-`1-9` jump repo · type to fuzzy-search · `↑↓`/`ctrl-n/p` move · `enter` select ·
+Type to fuzzy-search · `↑↓`/`ctrl-n/p` move · `enter` select ·
 `ctrl+t` toggle panes · `esc` cancel.

@@ -83,7 +83,6 @@ type node struct {
 	path     string // breadcrumb, e.g. "monorepo-front › infra-metrics"
 	wsID     string // workspace to focus (repo/worktree, and a pane's workspace)
 	paneID   string // pane to focus
-	num      int    // 1..9 for repo headers, else 0
 	status   string // aggregated agent status (see statusDot); drives the gutter dot
 	expanded bool
 	children []*node
@@ -578,7 +577,7 @@ func buildTree(wss []wsInfo, panes []paneInfo) []*node {
 	}
 
 	var roots []*node
-	for i, g := range glist {
+	for _, g := range glist {
 		var main wsInfo
 		found := false
 		for _, ws := range g.wss {
@@ -592,11 +591,7 @@ func buildTree(wss []wsInfo, panes []paneInfo) []*node {
 			main = g.wss[0]
 		}
 		name := repoName(main)
-		num := 0
-		if i < 9 {
-			num = i + 1
-		}
-		repo := &node{kind: "repo", label: name, path: name, wsID: main.ID, num: num, expanded: true}
+		repo := &node{kind: "repo", label: name, path: name, wsID: main.ID, expanded: true}
 		if main.Worktree != nil {
 			repo.branch = gitBranch(main.Worktree.CheckoutPath)
 			repo.ticket = ticketFrom(repo.branch)
@@ -685,7 +680,6 @@ func flatten(roots []*node) ([]*node, []string, []string) {
 // ---- key bindings (bubbles/key) ----
 
 type keyMap struct {
-	Jump   key.Binding
 	Up     key.Binding
 	Down   key.Binding
 	Select key.Binding
@@ -695,13 +689,12 @@ type keyMap struct {
 }
 
 func (k keyMap) ShortHelp() []key.Binding {
-	return []key.Binding{k.Jump, k.Filter, k.Up, k.Down, k.Select, k.Toggle, k.Cancel}
+	return []key.Binding{k.Filter, k.Up, k.Down, k.Select, k.Toggle, k.Cancel}
 }
 func (k keyMap) FullHelp() [][]key.Binding { return [][]key.Binding{k.ShortHelp()} }
 
 func defaultKeys() keyMap {
 	return keyMap{
-		Jump:   key.NewBinding(key.WithKeys("1", "2", "3", "4", "5", "6", "7", "8", "9"), key.WithHelp("1-9", "jump repo")),
 		Up:     key.NewBinding(key.WithKeys("up", "ctrl+p"), key.WithHelp("↑", "up")),
 		Down:   key.NewBinding(key.WithKeys("down", "ctrl+n"), key.WithHelp("↓", "down")),
 		Select: key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "select")),
@@ -716,7 +709,6 @@ func defaultKeys() keyMap {
 type rowItem struct {
 	n     *node
 	depth int
-	num   int // jump number shown as [n]; original when unfiltered, else 1..N
 	match bool
 	score int   // fuzzy score (only meaningful when match)
 	idx   []int // matched character positions, for highlighting
@@ -724,9 +716,10 @@ type rowItem struct {
 
 type model struct {
 	roots         []*node
-	allNodes      []*node  // flattened, parallel to lowerLabels/lowerBranches
+	allNodes      []*node  // flattened, parallel to lowerLabels/lowerBranches/lowerMetas
 	lowerLabels   []string // lowercased labels for the fuzzy matcher
 	lowerBranches []string // lowercased branches ("" when same as label); extra match text
+	lowerMetas    []string // ticket + PR number per node ("" when none); extra match text
 	slugNodes     map[string][]*node // nodes with a branch, grouped by GitHub slug
 	prPending     int                // in-flight gh fetches; cache is saved when it reaches 0
 	cache         prCache            // loaded at startup, merged as repoPRsMsg arrive
@@ -746,7 +739,6 @@ var (
 	stSel    = lipgloss.NewStyle().Background(lipgloss.Color("8")).Bold(true)
 	stMatch  = lipgloss.NewStyle().Foreground(lipgloss.Color("11"))
 	stCrumb  = lipgloss.NewStyle().Foreground(lipgloss.Color("6"))
-	stNum    = lipgloss.NewStyle().Foreground(lipgloss.Color("12"))
 	// stDev colors the "(dev)" marker shown in the prompt for non-release builds.
 	stDev = lipgloss.NewStyle().Foreground(lipgloss.Color("208")).Bold(true)
 
@@ -885,6 +877,24 @@ func promptText() string {
 	return stPrompt.Render("goto (") + stDev.Render("dev") + stPrompt.Render(") ❯ ")
 }
 
+// refreshMetas rebuilds the ticket / PR-number search corpus, parallel to
+// allNodes. This is what lets a query like "1234" find the row showing
+// "#1234", or a ticket that only came from a PR title. Rebuilt whenever PR
+// annotations change (they arrive async from gh).
+func (m *model) refreshMetas() {
+	m.lowerMetas = m.lowerMetas[:0]
+	for _, n := range m.allNodes {
+		meta := strings.ToLower(n.ticket)
+		if n.pr != nil {
+			if meta != "" {
+				meta += " "
+			}
+			meta += fmt.Sprintf("#%d", n.pr.Number)
+		}
+		m.lowerMetas = append(m.lowerMetas, meta)
+	}
+}
+
 // kindBonus biases the ranking so repo/worktree names outrank panes on ties,
 // keeping the "type h -> herdr" feel even though fuzzy does the real scoring.
 func kindBonus(kind string) int {
@@ -911,14 +921,17 @@ func (m *model) applyFilter() {
 		for _, mt := range fuzzy.Find(q, m.lowerLabels) {
 			hits[m.allNodes[mt.Index]] = hit{mt.Score, mt.MatchedIndexes}
 		}
-		// Branches are matched separately so queries like "feat/x" find a
-		// worktree whose label is the "feat-x" folder slug. Branch hits carry
-		// no MatchedIndexes: those indexes point into the branch, not the
-		// rendered label, so there is nothing to highlight.
-		for _, mt := range fuzzy.Find(q, m.lowerBranches) {
-			n := m.allNodes[mt.Index]
-			if h, ok := hits[n]; !ok || mt.Score > h.score {
-				hits[n] = hit{mt.Score, nil}
+		// Branches and ticket/PR metadata are matched separately so queries
+		// like "feat/x" find a worktree whose label is the "feat-x" folder
+		// slug, and "1234" finds the row showing PR #1234. These hits carry
+		// no MatchedIndexes: those indexes point into the branch/meta text,
+		// not the rendered label, so there is nothing to highlight.
+		for _, corpus := range [][]string{m.lowerBranches, m.lowerMetas} {
+			for _, mt := range fuzzy.Find(q, corpus) {
+				n := m.allNodes[mt.Index]
+				if h, ok := hits[n]; !ok || mt.Score > h.score {
+					hits[n] = hit{mt.Score, nil}
+				}
 			}
 		}
 	}
@@ -960,25 +973,6 @@ func (m *model) applyFilter() {
 	for _, r := range m.roots {
 		if subtree(r) {
 			walk(r, 0)
-		}
-	}
-
-	// Number the repo rows: original sidebar number when unfiltered, otherwise
-	// 1..N over the visible results so the digit you see is the one you press.
-	seq := 0
-	for i := range m.rows {
-		if m.rows[i].n.kind != "repo" {
-			continue
-		}
-		if filtering {
-			seq++
-			if seq <= 9 {
-				m.rows[i].num = seq
-			} else {
-				m.rows[i].num = 0
-			}
-		} else {
-			m.rows[i].num = m.rows[i].n.num
 		}
 	}
 
@@ -1046,27 +1040,16 @@ func rowLine(r rowItem, selected bool) string {
 	// highlight (nested ANSI on a background renders inconsistently across
 	// terminals).
 	dot := statusDot(r.n.status) + " "
-	// Fixed 4-col number gutter on every row ("[n] " on numbered repos, blank
-	// otherwise) so unnumbered repos and their descendants keep the same left
-	// edge as numbered ones.
-	numText := "    "
-	if r.n.kind == "repo" && r.num > 0 {
-		numText = fmt.Sprintf("[%d] ", r.num)
-	}
 	if selected {
 		// Plain text inside the highlight. Constant 2-col gutter keeps content
 		// aligned whether or not the row is selected.
-		return dot + stSel.Render("▌ "+numText+indent+plain(r))
-	}
-	num := numText
-	if numText != "    " {
-		num = stNum.Render(numText)
+		return dot + stSel.Render("▌ "+indent+plain(r))
 	}
 	name := r.n.label
 	if r.match {
 		name = highlight(r.n.label, r.idx)
 	}
-	return dot + "  " + num + indent + prPrefix(r.n) + name
+	return dot + "  " + indent + prPrefix(r.n) + name
 }
 
 // highlight styles the fuzzy-matched characters within a label.
@@ -1140,6 +1123,16 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			annotatePRs(m.slugNodes[msg.slug], msg.byBranch)
 			m.cache.Repos[msg.slug] = repoPRs{FetchedAt: time.Now(), Branches: msg.byBranch}
 			layoutPrefixes(m.roots)
+			// PR numbers are searchable, so a fresh annotation can change the
+			// results of the query being typed; re-filter, keeping the cursor
+			// on the same node.
+			m.refreshMetas()
+			var cur *node
+			if m.cursor >= 0 && m.cursor < len(m.rows) {
+				cur = m.rows[m.cursor].n
+			}
+			m.applyFilter()
+			m.keepCursorOn(cur)
 			m.renderContent()
 		}
 		m.prPending--
@@ -1184,20 +1177,6 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.keepCursorOn(cur)
 			m.renderContent()
 			return m, saveStateCmd(persisted{ShowPanes: m.showPanes})
-		}
-
-		// A digit always jumps to the numbered repo as currently shown (sidebar
-		// number when unfiltered, 1..N over the results when filtering). Digits
-		// are never search text.
-		if len(msg.Runes) == 1 && msg.Runes[0] >= '1' && msg.Runes[0] <= '9' {
-			want := int(msg.Runes[0] - '0')
-			for _, r := range m.rows {
-				if r.n.kind == "repo" && r.num == want {
-					m.action = []string{"workspace", "focus", r.n.wsID}
-					return m, tea.Quit
-				}
-			}
-			return m, nil
 		}
 
 		var cmd tea.Cmd
@@ -1289,11 +1268,7 @@ func main() {
 	if dump {
 		var walk func(n *node, d int)
 		walk = func(n *node, d int) {
-			// Same fixed number gutter as the TUI so the hierarchy reads the same.
-			prefix := "    "
-			if n.kind == "repo" && n.num > 0 {
-				prefix = fmt.Sprintf("[%d] ", n.num)
-			}
+			prefix := ""
 			if n.ticket != "" {
 				prefix += n.ticket + " "
 			}
@@ -1339,6 +1314,7 @@ func main() {
 		help:          help.New(),
 		keys:          defaultKeys(),
 	}
+	m.refreshMetas()
 	m.applyFilter()
 	m.renderContent()
 

@@ -100,10 +100,12 @@ asset name from `uname`.
   order in practice), workspace `number` as tiebreaker.
   Grouping key: `worktree.repo_key` (falls back to checkout_path, then a pane's
   cwd, then workspace id).
-- `1-9` digits ALWAYS jump (never search text): sidebar numbers when unfiltered,
-  renumbered 1..N over visible results when filtering.
 - Search: fuzzy with scoring + a small kind bonus (repo +8, worktree +4) so
-  repo/worktree names outrank panes. Matches keep ancestors visible.
+  repo/worktree names outrank panes. Besides the label, the branch, the Jira
+  ticket and the PR number are matched (typing "1234" finds the row showing
+  #1234). Matches keep ancestors visible. Digits are plain search text; the
+  old "1-9 jumps to a numbered repo" mode was removed on purpose — do not
+  reintroduce it.
 - Enter on repo/worktree -> `workspace focus` (does not change the focused pane
   inside it). Enter on pane -> focus that pane. No autofocus on switch.
 - Rows are prefixed with the Jira ticket (`KEY-123` regex over branch, then
