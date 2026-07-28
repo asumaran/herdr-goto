@@ -3,7 +3,7 @@
 A custom tree-style switcher across herdr repos, worktrees and panes, used as a
 replacement for herdr's native "goto" navigator. Built because the native goto
 rendered too much and didn't focus its search by default. It runs as a herdr
-plugin pane (or, legacy mode, as an external binary in a herdr pane keybind).
+plugin pane.
 
 ## Install as a herdr plugin
 
@@ -48,30 +48,6 @@ yourself first (`go build -o goto .` — build from source, don't run
 `fetch-binary.sh`, which would fetch the released build instead of your
 changes).
 
-## Legacy install (fixed path, prebuilt binary)
-
-Before the plugin packaging, herdr ran the binary from a fixed path via a
-`type = "pane"` keybind:
-
-```toml
-[[keys.command]]
-key = ["prefix+f", "ctrl+alt+f"]
-type = "pane"
-command = "~/.config/herdr/goto-tui/goto"
-description = "goto (bubbletea tree: type to search)"
-```
-
-- Source lives here (`~/Developer/herdr-goto`).
-- The binary herdr runs lives at `~/.config/herdr/goto-tui/goto`.
-- Runtime state (`state.json`) lives next to it, resolved via `os.UserConfigDir()`.
-
-Releases attach a prebuilt `goto-darwin-arm64` binary. To run the latest release
-in this mode:
-
-```bash
-scripts/update-local.sh        # downloads the latest release into the keybind path
-```
-
 ## Develop
 
 ```bash
@@ -79,9 +55,6 @@ go build -o goto .             # local build inside the repo
 ./goto -dump                   # print the tree (no TUI), for debugging without a TTY
 ./goto -version                # print the embedded version
 go vet ./... && go test ./...
-
-scripts/build-local.sh         # build current source over the keybind path to test it live
-                               # (run scripts/update-local.sh to go back to the released build)
 ```
 
 Single static binary, no runtime deps.
@@ -92,7 +65,8 @@ Single static binary, no runtime deps.
 scripts/release.sh 0.2.0       # gate, tag, push, publish the GitHub release; CI attaches the binary
 ```
 
-See `CLAUDE.md` for the full release vs. update-local model.
+The release asset (`goto-darwin-arm64`) is what `fetch-binary.sh` downloads on
+plugin installs, so every release must keep attaching it.
 
 ## Stack
 
@@ -113,7 +87,8 @@ See `CLAUDE.md` for the full release vs. update-local model.
 - Tree = two levels by default: repo (== main checkout) -> worktrees. Panes are
   hidden by default; `ctrl+t` toggles them, and that choice persists in
   `state.json` (`{"show_panes":bool}`) under `HERDR_PLUGIN_STATE_DIR` when
-  running as a plugin, or `~/.config/herdr/goto-tui/` in legacy mode.
+  running as a plugin, or `~/.config/herdr/goto-tui/` when run standalone
+  (outside herdr, e.g. for debugging).
 - Repos are ordered by where they first appear in the sidebar (lowest workspace
   `number`); worktrees inside a repo also by `number`.
 - Repo grouping key: `worktree.repo_key` (falls back to checkout_path, then a

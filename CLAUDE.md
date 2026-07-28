@@ -10,12 +10,11 @@ herdr plugin pane (session-modal popup): open, pick a target, exit. It
 talks to herdr through its CLI (`workspace list` / `pane list` to read,
 `workspace focus` / `agent focus` to act).
 
-Distributed two ways: as a herdr plugin (`herdr plugin install
-asumaran/herdr-goto`; the manifest's `[[build]]` runs `scripts/fetch-binary.sh`,
-which downloads the release binary matching the manifest version and falls back
-to `go build`), and, legacy channel, as a prebuilt binary attached to each
-GitHub Release for the fixed-path keybind install. There is no published
-library.
+Distributed as a herdr plugin (`herdr plugin install asumaran/herdr-goto`; the
+manifest's `[[build]]` runs `scripts/fetch-binary.sh`, which downloads the
+release binary matching the manifest version and falls back to `go build`).
+Each GitHub Release attaches the `goto-darwin-arm64` asset that
+`fetch-binary.sh` depends on. There is no published library.
 
 ## Stack & layout
 
@@ -29,7 +28,7 @@ library.
 - `herdr-plugin.toml` — the herdr plugin manifest (id `asumaran.goto`): a
   `[[build]]` (runs `scripts/fetch-binary.sh` on install), the `goto` popup
   pane, and the `open` action that opens it (keybind entry point).
-- `scripts/` — release/install helpers (see below) plus two plugin pieces:
+- `scripts/` — `release.sh` (see below) plus two plugin pieces:
   `open-pane.sh`, the `open` action's command (plugin commands are argv without
   shell, so the wrapper resolves `HERDR_BIN_PATH` at runtime), and
   `fetch-binary.sh`, the `[[build]]` command (downloads the release binary
@@ -50,11 +49,11 @@ go vet ./... && go test ./...
 
 `version` in `main.go` defaults to `"dev"` and is stamped at build time via
 `-ldflags "-X main.version=<tag>"` (CI does this from the release tag;
-`scripts/build-local.sh` stamps `local-<sha>`).
+`fetch-binary.sh`'s source fallback stamps `v<version>-source`).
 
 ## How it's wired into herdr
 
-Primary wiring is the **plugin** (requires herdr >= 0.7.5). The manifest
+The plugin requires herdr >= 0.7.5. The manifest
 declares the `goto` popup pane (45% x 50%) and the `open` action; herdr has no
 `plugin_pane` keybind type, so the key binds the action, which runs
 `scripts/open-pane.sh` -> `herdr plugin pane open`:
@@ -75,43 +74,27 @@ command = "asumaran.goto.open"
   your local changes); the pane runs `./goto` from the plugin root.
 - Runtime state (`state.json`, `prcache.json`) lives in
   `HERDR_PLUGIN_STATE_DIR` (herdr injects it; never store state in the plugin
-  checkout).
+  checkout). When run standalone (outside herdr, e.g. `./goto -dump`),
+  `main.go` falls back to `~/.config/herdr/goto-tui/`.
 
-### Legacy wiring (fixed path)
+## Releasing
 
-Before plugin packaging, `config.toml` ran the binary by fixed path with
-`type = "pane"` and `command = "~/.config/herdr/goto-tui/goto"`. In that mode
-`main.go` falls back to `~/.config/herdr/goto-tui/` for state, and switching
-versions means replacing the binary at that path, never editing `config.toml`:
+`scripts/release.sh <X.Y.Z>` cuts and publishes a release. It gates on a clean
+tree + green `go vet`/`go build`/`go test`, generates the `CHANGELOG.md` entry
+and GitHub release notes from commit subjects since the last tag, syncs
+`version` in `herdr-plugin.toml` to the tag, commits (`chore(release):
+vX.Y.Z`), tags, pushes, and publishes the GitHub release. CI
+(`.github/workflows/release.yml`) then builds the binary (stamping the version
+from the tag) and attaches `goto-darwin-arm64` — the asset `fetch-binary.sh`
+downloads on plugin installs, so it must keep being published.
 
-- **Use the latest release:** `scripts/update-local.sh` downloads the latest
-  release asset for this OS/arch into that path.
-- **Test local changes:** `scripts/build-local.sh` compiles the current source
-  over that same path. Run `scripts/update-local.sh` afterwards to go back to
-  the released build.
-
-## Releasing vs. updating the local install
-
-Two separate actions, two separate scripts by design. Do not merge them.
-
-- `scripts/release.sh <X.Y.Z>` only cuts and publishes a release. It gates on a
-  clean tree + green `go vet`/`go build`/`go test`, generates the `CHANGELOG.md`
-  entry and GitHub release notes from commit subjects since the last tag, syncs
-  `version` in `herdr-plugin.toml` to the tag, commits (`chore(release):
-  vX.Y.Z`), tags, pushes, and publishes the GitHub release. CI (`.github/workflows/release.yml`) then builds the binary
-  (stamping the version from the tag) and attaches `goto-darwin-arm64`. It must
-  not touch the local install.
-- `scripts/update-local.sh` only refreshes this machine's installed binary to
-  the latest published release.
-
-After cutting a release, offer to update the local install, and run
-`scripts/update-local.sh` if the user asks (or has already said to do it
-automatically). Never update the local install as a side effect of releasing.
+Releasing does not touch this machine's linked plugin: local dev runs whatever
+`./goto` is built in the working copy (`go build -o goto .`).
 
 The release workflow builds only `darwin/arm64` (the development machine). To
 support more platforms, add a build matrix in `release.yml` and upload one
-`goto-<os>-<arch>` asset per target; `update-local.sh` and `fetch-binary.sh`
-already resolve the asset name from `uname`.
+`goto-<os>-<arch>` asset per target; `fetch-binary.sh` already resolves the
+asset name from `uname`.
 
 ## Behaviour / decisions
 
