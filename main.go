@@ -102,6 +102,12 @@ type persisted struct {
 }
 
 func stateFile() string {
+	// Running as a herdr plugin: herdr creates and injects a per-plugin state
+	// dir; runtime state must live there, not in the plugin checkout.
+	if dir := os.Getenv("HERDR_PLUGIN_STATE_DIR"); dir != "" {
+		return filepath.Join(dir, "state.json")
+	}
+	// Standalone fallback (fixed-path install at ~/.config/herdr/goto-tui).
 	base := os.Getenv("XDG_CONFIG_HOME")
 	if base == "" {
 		if h, err := os.UserHomeDir(); err == nil {
