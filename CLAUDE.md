@@ -35,6 +35,9 @@ Each GitHub Release attaches the `goto-darwin-arm64` asset that
   matching the manifest's `version`, falls back to `go build -ldflags
   "-X main.version=v<version>-source"`, aborts the install if neither works;
   `GOTO_BUILD_FROM_SOURCE=1` skips the download and always compiles).
+- `scripts/demo/` — tooling to re-record the README demo GIF
+  (`docs/demo.gif`); see `scripts/demo/README.md`. Uses a disposable herdr
+  session (`gotodemo`), never the user's default session.
 - The compiled binary (`goto`, `goto-darwin-arm64`) is **never committed**
   (`.gitignore`); it is built locally or in CI.
 

@@ -5,6 +5,8 @@ replacement for herdr's native "goto" navigator. Built because the native goto
 rendered too much and didn't focus its search by default. It runs as a herdr
 plugin pane.
 
+![goto demo: popup over herdr, fuzzy search, workspace switch](docs/demo.gif)
+
 ## Install as a herdr plugin
 
 Requires herdr >= 0.7.5 on macOS:
