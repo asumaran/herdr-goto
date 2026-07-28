@@ -1,0 +1,32 @@
+id = "asumaran.goto"
+name = "goto"
+version = "0.7.0"
+min_herdr_version = "0.7.5"
+description = "Tree-style switcher across herdr repos, worktrees and panes"
+platforms = ["macos"]
+
+# Hybrid provisioning: download the prebuilt binary from the GitHub release
+# matching `version` above; fall back to `go build` when there is no asset for
+# this platform (then a Go toolchain is required).
+[[build]]
+command = ["scripts/fetch-binary.sh"]
+
+# herdr has no plugin_pane keybind type (only plugin_action), so the pane is
+# opened through this action; bind it with:
+#   [[keys.command]]
+#   key = ["prefix+f", "ctrl+alt+f"]
+#   type = "plugin_action"
+#   command = "asumaran.goto.open"
+[[actions]]
+id = "open"
+title = "Open goto switcher"
+contexts = ["global"]
+command = ["scripts/open-pane.sh"]
+
+[[panes]]
+id = "goto"
+title = "Goto"
+placement = "popup"
+width = "45%"
+height = "50%"
+command = ["./goto"]
