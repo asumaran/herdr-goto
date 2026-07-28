@@ -30,7 +30,9 @@ Each GitHub Release attaches the `goto-darwin-arm64` asset that
   pane, and the `open` action that opens it (keybind entry point).
 - `scripts/` — `release.sh` (see below) plus two plugin pieces:
   `open-pane.sh`, the `open` action's command (plugin commands are argv without
-  shell, so the wrapper resolves `HERDR_BIN_PATH` at runtime), and
+  shell, so the wrapper resolves `HERDR_BIN_PATH` at runtime; honors optional
+  `GOTO_POPUP_WIDTH`/`GOTO_POPUP_HEIGHT` env overrides over the manifest's
+  popup size — used by the demo recording, not by normal installs), and
   `fetch-binary.sh`, the `[[build]]` command (downloads the release binary
   matching the manifest's `version`, falls back to `go build -ldflags
   "-X main.version=v<version>-source"`, aborts the install if neither works;
@@ -56,10 +58,10 @@ go vet ./... && go test ./...
 
 ## How it's wired into herdr
 
-The plugin requires herdr >= 0.7.5. The manifest
-declares the `goto` popup pane (45% x 50%) and the `open` action; herdr has no
-`plugin_pane` keybind type, so the key binds the action, which runs
-`scripts/open-pane.sh` -> `herdr plugin pane open`:
+The plugin requires herdr >= 0.7.5. The manifest declares the `goto` popup
+pane (45% x 50%) and the `open` action; herdr has no `plugin_pane` keybind
+type, so the key binds the action, which runs `scripts/open-pane.sh` ->
+`herdr plugin pane open`:
 
 ```toml
 [[keys.command]]
@@ -91,8 +93,12 @@ vX.Y.Z`), tags, pushes, and publishes the GitHub release. CI
 from the tag) and attaches `goto-darwin-arm64` — the asset `fetch-binary.sh`
 downloads on plugin installs, so it must keep being published.
 
-Releasing does not touch this machine's linked plugin: local dev runs whatever
-`./goto` is built in the working copy (`go build -o goto .`).
+Releasing does not touch this machine's linked plugin: it runs whatever
+`./goto` sits in the working copy. After cutting a release, offer to install
+the published build locally by running `scripts/fetch-binary.sh` (downloads
+the release binary matching the manifest version over `./goto`); never do it
+as a side effect of releasing. `go build -o goto .` switches back to a dev
+build when working on the code.
 
 The release workflow builds only `darwin/arm64` (the development machine). To
 support more platforms, add a build matrix in `release.yml` and upload one
