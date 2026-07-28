@@ -98,8 +98,11 @@ if [ -n "$prev_tag" ] && [ -n "$repo_slug" ]; then
     "$repo_slug" "$prev_tag" "$tag" >> "$notes_file"
 fi
 
+# Keep the plugin manifest version in sync with the release tag.
+sed -i '' -E "s/^version = \".*\"/version = \"${VERSION}\"/" herdr-plugin.toml
+
 # --- apply ------------------------------------------------------------------
-git add CHANGELOG.md
+git add CHANGELOG.md herdr-plugin.toml
 git commit -m "chore(release): ${tag}"
 git tag "$tag"
 
