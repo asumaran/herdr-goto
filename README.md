@@ -2,13 +2,56 @@
 
 A custom tree-style switcher across herdr repos, worktrees and panes, used as a
 replacement for herdr's native "goto" navigator. Built because the native goto
-rendered too much and didn't focus its search by default, and because herdr's
-plugin/UI model can't replace a built-in dialog — so this runs as an external
-binary in a herdr pane.
+rendered too much and didn't focus its search by default. It runs as a herdr
+plugin pane (or, legacy mode, as an external binary in a herdr pane keybind).
 
-## Where it's wired
+## Install as a herdr plugin
 
-`~/.config/herdr/config.toml`, under `[[keys.command]]`:
+Requires herdr >= 0.7.5 on macOS:
+
+```bash
+herdr plugin install asumaran/herdr-goto
+```
+
+The install's build step (`scripts/fetch-binary.sh`) downloads the prebuilt
+binary from the GitHub release matching the manifest's version, so no Go
+toolchain is needed on `darwin/arm64`. On platforms without a release asset it
+falls back to `go build` (then Go is required); if neither path works the
+install aborts.
+
+To always compile locally instead of running the prebuilt binary (requires Go):
+
+```bash
+GOTO_BUILD_FROM_SOURCE=1 herdr plugin install asumaran/herdr-goto
+```
+
+Then bind a key to the plugin action (herdr has no `plugin_pane` keybind type,
+so the pane is opened through the `open` action) in `~/.config/herdr/config.toml`:
+
+```toml
+[[keys.command]]
+key = ["prefix+f", "ctrl+alt+f"]
+type = "plugin_action"
+command = "asumaran.goto.open"
+description = "goto (bubbletea tree: type to search)"
+```
+
+The pane opens as a session-modal `popup` (45% x 50%, sized in the manifest)
+with keyboard focus. herdr
+injects `HERDR_BIN_PATH` / `HERDR_SOCKET_PATH` (so the binary talks to the same
+herdr server) and `HERDR_PLUGIN_STATE_DIR`, where runtime state (`state.json`,
+`prcache.json`) lives.
+
+For local development, `herdr plugin link ~/Developer/herdr-goto` registers the
+working copy. `plugin link` does **not** run build commands, so build the binary
+yourself first (`go build -o goto .` — build from source, don't run
+`fetch-binary.sh`, which would fetch the released build instead of your
+changes).
+
+## Legacy install (fixed path, prebuilt binary)
+
+Before the plugin packaging, herdr ran the binary from a fixed path via a
+`type = "pane"` keybind:
 
 ```toml
 [[keys.command]]
@@ -18,23 +61,12 @@ command = "~/.config/herdr/goto-tui/goto"
 description = "goto (bubbletea tree: type to search)"
 ```
 
-`type = "pane"` opens the binary zoomed (full screen) with keyboard focus. herdr
-passes `HERDR_BIN_PATH` and `HERDR_SOCKET_PATH` in the env, so the binary calls
-the same herdr server.
-
-The keybind points at a **fixed path** (`~/.config/herdr/goto-tui/goto`) that is
-deliberately decoupled from this repo:
-
 - Source lives here (`~/Developer/herdr-goto`).
 - The binary herdr runs lives at `~/.config/herdr/goto-tui/goto`.
 - Runtime state (`state.json`) lives next to it, resolved via `os.UserConfigDir()`.
 
-So switching which version runs never means editing `config.toml` — just replace
-the binary at that path.
-
-## Install / update
-
-Releases attach a prebuilt `goto-darwin-arm64` binary. To run the latest release:
+Releases attach a prebuilt `goto-darwin-arm64` binary. To run the latest release
+in this mode:
 
 ```bash
 scripts/update-local.sh        # downloads the latest release into the keybind path
@@ -80,7 +112,8 @@ See `CLAUDE.md` for the full release vs. update-local model.
 
 - Tree = two levels by default: repo (== main checkout) -> worktrees. Panes are
   hidden by default; `ctrl+t` toggles them, and that choice persists in
-  `~/.config/herdr/goto-tui/state.json` (`{"show_panes":bool}`).
+  `state.json` (`{"show_panes":bool}`) under `HERDR_PLUGIN_STATE_DIR` when
+  running as a plugin, or `~/.config/herdr/goto-tui/` in legacy mode.
 - Repos are ordered by where they first appear in the sidebar (lowest workspace
   `number`); worktrees inside a repo also by `number`.
 - Repo grouping key: `worktree.repo_key` (falls back to checkout_path, then a

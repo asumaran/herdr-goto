@@ -5,14 +5,17 @@ Guidance for working in this repository.
 ## What this is
 
 `herdr-goto` is a small tree-style switcher across herdr repos, worktrees and
-panes, used as a replacement for herdr's native "goto" navigator. It runs as an
-external binary inside a herdr pane (a `type = "pane"` keybind): open full
-screen, pick a target, exit. It talks to herdr through its CLI (`workspace
-list` / `pane list` to read, `workspace focus` / `agent focus` to act).
+panes, used as a replacement for herdr's native "goto" navigator. It runs as a
+herdr plugin pane (session-modal popup): open, pick a target, exit. It
+talks to herdr through its CLI (`workspace list` / `pane list` to read,
+`workspace focus` / `agent focus` to act).
 
-Distributed as a prebuilt binary attached to each GitHub Release (no package
-registry). There is no published library; the only consumer is the local herdr
-keybind.
+Distributed two ways: as a herdr plugin (`herdr plugin install
+asumaran/herdr-goto`; the manifest's `[[build]]` runs `scripts/fetch-binary.sh`,
+which downloads the release binary matching the manifest version and falls back
+to `go build`), and, legacy channel, as a prebuilt binary attached to each
+GitHub Release for the fixed-path keybind install. There is no published
+library.
 
 ## Stack & layout
 
@@ -23,7 +26,16 @@ keybind.
 - `main.go` — the whole program: herdr CLI JSON shapes, tree building, the
   filter-that-keeps-ancestors, rendering, and `main()`. It's intentionally one
   file; keep it that way unless it clearly outgrows it.
-- `scripts/` — release/install helpers (see below).
+- `herdr-plugin.toml` — the herdr plugin manifest (id `asumaran.goto`): a
+  `[[build]]` (runs `scripts/fetch-binary.sh` on install), the `goto` popup
+  pane, and the `open` action that opens it (keybind entry point).
+- `scripts/` — release/install helpers (see below) plus two plugin pieces:
+  `open-pane.sh`, the `open` action's command (plugin commands are argv without
+  shell, so the wrapper resolves `HERDR_BIN_PATH` at runtime), and
+  `fetch-binary.sh`, the `[[build]]` command (downloads the release binary
+  matching the manifest's `version`, falls back to `go build -ldflags
+  "-X main.version=v<version>-source"`, aborts the install if neither works;
+  `GOTO_BUILD_FROM_SOURCE=1` skips the download and always compiles).
 - The compiled binary (`goto`, `goto-darwin-arm64`) is **never committed**
   (`.gitignore`); it is built locally or in CI.
 
@@ -42,25 +54,35 @@ go vet ./... && go test ./...
 
 ## How it's wired into herdr
 
-herdr's `~/.config/herdr/config.toml` runs the binary by **fixed path**:
+Primary wiring is the **plugin** (requires herdr >= 0.7.5). The manifest
+declares the `goto` popup pane (45% x 50%) and the `open` action; herdr has no
+`plugin_pane` keybind type, so the key binds the action, which runs
+`scripts/open-pane.sh` -> `herdr plugin pane open`:
 
 ```toml
 [[keys.command]]
 key = ["prefix+f", "ctrl+alt+f"]
-type = "pane"
-command = "~/.config/herdr/goto-tui/goto"
+type = "plugin_action"
+command = "asumaran.goto.open"
 ```
 
-That path is deliberate and **decoupled from this repo**:
+- Install: `herdr plugin install asumaran/herdr-goto` (clones, runs `[[build]]`
+  = `scripts/fetch-binary.sh`: release download first, `go build` fallback, so
+  a Go toolchain is only needed off `darwin/arm64`).
+- Local dev: `herdr plugin link ~/Developer/herdr-goto` registers the working
+  copy. `plugin link` does **not** run build commands — run `go build -o goto .`
+  yourself (not `fetch-binary.sh`, which would fetch the released build over
+  your local changes); the pane runs `./goto` from the plugin root.
+- Runtime state (`state.json`, `prcache.json`) lives in
+  `HERDR_PLUGIN_STATE_DIR` (herdr injects it; never store state in the plugin
+  checkout).
 
-- The repo (source) lives in `~/Developer/herdr-goto`.
-- The binary herdr runs lives at `~/.config/herdr/goto-tui/goto`.
-- Runtime state (`state.json`, `{"show_panes":bool}`) lives next to it at
-  `~/.config/herdr/goto-tui/state.json`. `main.go` resolves it via
-  `os.UserConfigDir()`, so it's the same path no matter where the binary runs.
+### Legacy wiring (fixed path)
 
-Because herdr points at a fixed path, "switch which version runs" == "replace
-the binary at that path". Two ways to do that, never edit `config.toml`:
+Before plugin packaging, `config.toml` ran the binary by fixed path with
+`type = "pane"` and `command = "~/.config/herdr/goto-tui/goto"`. In that mode
+`main.go` falls back to `~/.config/herdr/goto-tui/` for state, and switching
+versions means replacing the binary at that path, never editing `config.toml`:
 
 - **Use the latest release:** `scripts/update-local.sh` downloads the latest
   release asset for this OS/arch into that path.
@@ -74,9 +96,9 @@ Two separate actions, two separate scripts by design. Do not merge them.
 
 - `scripts/release.sh <X.Y.Z>` only cuts and publishes a release. It gates on a
   clean tree + green `go vet`/`go build`/`go test`, generates the `CHANGELOG.md`
-  entry and GitHub release notes from commit subjects since the last tag,
-  commits (`chore(release): vX.Y.Z`), tags, pushes, and publishes the GitHub
-  release. CI (`.github/workflows/release.yml`) then builds the binary
+  entry and GitHub release notes from commit subjects since the last tag, syncs
+  `version` in `herdr-plugin.toml` to the tag, commits (`chore(release):
+  vX.Y.Z`), tags, pushes, and publishes the GitHub release. CI (`.github/workflows/release.yml`) then builds the binary
   (stamping the version from the tag) and attaches `goto-darwin-arm64`. It must
   not touch the local install.
 - `scripts/update-local.sh` only refreshes this machine's installed binary to
@@ -88,8 +110,8 @@ automatically). Never update the local install as a side effect of releasing.
 
 The release workflow builds only `darwin/arm64` (the development machine). To
 support more platforms, add a build matrix in `release.yml` and upload one
-`goto-<os>-<arch>` asset per target; `update-local.sh` already resolves the
-asset name from `uname`.
+`goto-<os>-<arch>` asset per target; `update-local.sh` and `fetch-binary.sh`
+already resolve the asset name from `uname`.
 
 ## Behaviour / decisions
 
